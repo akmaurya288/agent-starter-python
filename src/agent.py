@@ -1,4 +1,6 @@
 import logging
+import os
+import time
 
 from dotenv import load_dotenv
 from livekit import rtc
@@ -12,8 +14,9 @@ from livekit.agents import (
     inference,
     room_io,
 )
-from livekit.plugins import noise_cancellation, silero
+from livekit.plugins import noise_cancellation, silero, deepgram, inworld, openai
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
+from livekit.agents import AgentStateChangedEvent, MetricsCollectedEvent, metrics
 
 logger = logging.getLogger("agent")
 
@@ -69,14 +72,28 @@ async def my_agent(ctx: JobContext):
     session = AgentSession(
         # Speech-to-text (STT) is your agent's ears, turning the user's speech into text that the LLM can understand
         # See all available models at https://docs.livekit.io/agents/models/stt/
-        stt=inference.STT(model="deepgram/nova-3", language="multi"),
+        # stt=inference.STT(model="deepgram/nova-3", language="multi"),
+        stt=deepgram.STT(
+            model='nova-3',
+            api_key='6cdc7210454511c8a10ab7ec3f377914cfab9b05',
+            language='multi'
+        ),
         # A Large Language Model (LLM) is your agent's brain, processing user input and generating a response
         # See all available models at https://docs.livekit.io/agents/models/llm/
-        llm=inference.LLM(model="openai/gpt-4.1-mini"),
+        # llm=inference.LLM(model="openai/gpt-4.1-mini"),
+        llm=openai.LLM(
+            model=os.getenv("LM_STUDIO_MODEL", "liquid/lfm2.5-1.2b"),
+            base_url=os.getenv("LM_STUDIO_BASE_URL", "http://127.0.0.1:1234/v1"),
+            api_key=os.getenv("LM_STUDIO_API_KEY", ""),
+        ),
         # Text-to-speech (TTS) is your agent's voice, turning the LLM's text into speech that the user can hear
         # See all available models as well as voice selections at https://docs.livekit.io/agents/models/tts/
-        tts=inference.TTS(
-            model="cartesia/sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
+        # tts=inference.TTS(
+        #     model="cartesia/sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
+        # ),
+        tts=inworld.TTS(
+            model='inworld-tts-1.5-mini',
+        api_key='U1cxclZ0N3dobHZjY05VVU4yN2xwN3cwYXdqejMwUGU6NG0ySTZ1N2E3V2NqSTM1dDdXM0FtMnRoTVRhQ1RqMnE3Y1ZwWXd5TVR1cjVEeWpkaFVlOWtmOHFLYW94eE9ISg=='
         ),
         # VAD and turn detection are used to determine when the user is speaking and when the agent should respond
         # See more at https://docs.livekit.io/agents/build/turns
@@ -84,7 +101,7 @@ async def my_agent(ctx: JobContext):
         vad=ctx.proc.userdata["vad"],
         # allow the LLM to generate a response while waiting for the end of turn
         # See more at https://docs.livekit.io/agents/build/audio/#preemptive-generation
-        preemptive_generation=True,
+        preemptive_generation=False,
     )
 
     # To use a realtime model instead of a voice pipeline, use the following session setup instead.
@@ -106,6 +123,31 @@ async def my_agent(ctx: JobContext):
     # await avatar.start(session, room=ctx.room)
 
     # Start the session, which initializes the voice pipeline and warms up the models
+
+
+    usage_collector = metrics.UsageCollector()
+    last_eou_metrics: metrics.EOUMetrics | None = None
+
+    @session.on("metrics_collected")
+    def _on_metrices_collected(ev: MetricsCollectedEvent):
+        nonlocal last_eou_metrics
+        if ev.metrics.type == 'eou_metrics':
+            last_eou_metrics = ev.metrics
+
+        metrics.log_metrics(ev.metrics)
+        usage_collector.collect(ev.metrics)
+
+    async def log_usage():
+        summary = usage_collector.get_summary
+        logger.info("Usage summary: %s", summary)
+
+    @session.on("agent_state_changed")
+    def _on_agent_state_changed(ev: AgentStateChangedEvent):
+        if ev.new_state == "speaking":
+            if last_eou_metrics:
+                elapsed = time.time() - last_eou_metrics.timestamp
+                logger.info(f"Time to first audio: {elapsed:.3f}")
+
     await session.start(
         agent=Assistant(),
         room=ctx.room,
